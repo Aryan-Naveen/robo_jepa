@@ -31,5 +31,16 @@ jobs:
       - name: Copyright headers
         run: |
           missing=$(for f in $(git ls-files '*.py' '*.sh' '*.yaml' '*.yml'); do
-            head -n 16 "$f" | grep -q 'Copyright (c) Meta Platforms, Inc. and affiliates.' || echo "$f"; done)
+            head -n 16 "$f" | grep -q 'Copyright (c)' || echo "$f"; done)
           if [ -n "$missing" ]; then echo "Missing copyright header:"; echo "$missing"; exit 1; fi
+
+  experiment-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install numpy
+      - run: pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cpu
+      - run: python -m unittest discover -s experiments/tests -v

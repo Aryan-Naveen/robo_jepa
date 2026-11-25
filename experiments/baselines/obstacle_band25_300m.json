@@ -1,0 +1,100 @@
+{
+  "source": "Historical local band25 sweep; not produced by the new interface",
+  "task": "obstacle_reach",
+  "model_size": "300m",
+  "checkpoint_step": "300k",
+  "scene": 0,
+  "execution_steps": 18,
+  "horizon": 5,
+  "reach_distance_m": [
+    0.25,
+    0.5
+  ],
+  "obstacle_clearance_m": 0.03,
+  "trials": [
+    {
+      "samples": 64,
+      "seed": 0,
+      "final_reward": 0.6620304000253865,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 64,
+      "seed": 1,
+      "final_reward": 0.07577122086022192,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 64,
+      "seed": 2,
+      "final_reward": 0.946320669914377,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 256,
+      "seed": 0,
+      "final_reward": 0.6688858707425751,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 256,
+      "seed": 1,
+      "final_reward": 0.04285318908466962,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 256,
+      "seed": 2,
+      "final_reward": 0.9633231745153411,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 1024,
+      "seed": 0,
+      "final_reward": 0.7701397521761392,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 1024,
+      "seed": 1,
+      "final_reward": 0.018939561135511873,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 1024,
+      "seed": 2,
+      "final_reward": 0.9810887953321706,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 2048,
+      "seed": 0,
+      "final_reward": 0.6791736017300045,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 2048,
+      "seed": 1,
+      "final_reward": 0.0,
+      "success": false,
+      "planning_steps_to_success": null
+    },
+    {
+      "samples": 2048,
+      "seed": 2,
+      "final_reward": 0.945947785170911,
+      "success": false,
+      "planning_steps_to_success": null
+    }
+  ]
+}

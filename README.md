@@ -1,3 +1,6 @@
+> **Frozen-model experiment interface:** see [experiments/README.md](experiments/README.md) for one-command RoboCasa trials, adjusted ObstacleReach defaults, downstream metrics, encoder/predictor profiling, and collaborator setup.
+> Quick start after setup: `python -m experiments run --task obstacle_reach --model-size 300m --trials 3 --output outputs/obstacle-300m`
+
 <h1 align="center">
     <p>🤖 <b>RoboJEPA</b></p>
 </h1>

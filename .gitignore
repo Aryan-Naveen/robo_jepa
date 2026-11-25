@@ -42,3 +42,7 @@ slurm/
 
 # Local test suite and fixtures helpers (kept locally, not part of the repo)
 app/robo_jepa/tests/
+
+# Experiment checkpoints and generated runs
+/models/
+/results/
