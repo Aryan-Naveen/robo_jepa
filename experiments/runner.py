@@ -326,8 +326,11 @@ def main():
         for c in configs:
             prepare(c, a.resume)
         if len(configs) > 1:
-            write_json(a.output.resolve() / "ladder.json", {"runs": [Path(c["output"]).name for c in configs],
-                                                            "samples": [c["samples"] for c in configs]})
+            # Merge with an existing ladder so more N can be added to the same directory later.
+            path = a.output.resolve() / "ladder.json"
+            known = dict(zip(*(json.loads(path.read_text())[k] for k in ("samples", "runs")))) if path.exists() else {}
+            known.update({c["samples"]: Path(c["output"]).name for c in configs})
+            write_json(path, {"runs": [known[n] for n in sorted(known)], "samples": sorted(known)})
         from .metrics import summarize
         # Seeds outside, candidate counts inside: a partial ladder still covers every count.
         first = configs[0]
