@@ -46,3 +46,6 @@ app/robo_jepa/tests/
 # Experiment checkpoints and generated runs
 /models/
 /results/
+
+# Local symlink to the planning checkpoints (see experiments/README.md)
+/models

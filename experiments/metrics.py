@@ -11,6 +11,8 @@ import numpy as np
 
 from .runner import write_json
 
+REACH_TASKS = ("reach", "object_reach", "obstacle_reach")
+
 
 def mean(values):
     values = [v for v in values if v is not None]
@@ -20,7 +22,9 @@ def mean(values):
 def module_metrics(calls):
     if not calls:
         return None
-    latency = sum(c["latency_s"] for c in calls)
+    # Forwards run under FlopCounterMode are slower; time from the others and scale to all calls.
+    timed = [c for c in calls if not c.get("flops_counted")] or calls
+    latency = sum(c["latency_s"] for c in timed) * len(calls) / len(timed)
     samples = sum(c["batch_size"] for c in calls)
     tokens = sum(c["output_tokens"] for c in calls)
     measured_flops = [c["flops"] for c in calls]
@@ -30,7 +34,7 @@ def module_metrics(calls):
     # Boundary average, explicitly NOT a continuous time-weighted memory estimate.
     memory = [v for c in calls for v in (c["allocated_before_bytes"], c["allocated_after_bytes"]) if v is not None]
     return {
-        "forward_calls": len(calls), "sample_forwards": samples, "output_tokens": tokens,
+        "forward_calls": len(calls), "timed_calls": len(timed), "sample_forwards": samples, "output_tokens": tokens,
         "tokens_per_second": tokens / latency if latency else None,
         "latency_total_s": latency, "latency_mean_batch_s": latency / len(calls),
         "latency_amortized_sample_s": latency / samples,
@@ -39,6 +43,15 @@ def module_metrics(calls):
         "peak_allocated_bytes": max(peaks) if peaks else None,
         "peak_increment_bytes": max(increments) if increments else None,
     }
+
+
+def goal_gap(trial, poses):
+    """Distance between the goal-image end-effector pose and the env's target point (needs scene.json)."""
+    scene = trial / "scene.json"
+    if poses is None or not scene.exists():
+        return None
+    goal = json.loads(scene.read_text()).get("init", {}).get("reach_goal_world")
+    return float(np.linalg.norm(poses[0] - np.asarray(goal))) if goal else None
 
 
 def trial_metrics(trial, config):
@@ -52,11 +65,9 @@ def trial_metrics(trial, config):
             raise ValueError(f"Missing/non-finite episode rewards in {trial}")
         if "env_info_success" not in data:
             raise ValueError("Simulator success flags are required; refusing to infer success from reward")
-        successes = np.asarray(data["env_info_success"], dtype=bool)
-        if len(successes) != len(rewards):
+        env_success = np.asarray(data["env_info_success"], dtype=bool)
+        if len(env_success) != len(rewards):
             raise ValueError("Success flags and reward steps are misaligned")
-        indices = np.flatnonzero(successes)
-        first_success = int(indices[0]) + 1 if len(indices) else None
         decisions = efficiency["decisions"]
         # execution_prefix=action_substeps=1 is fixed by the public runner:
         # one logged environment action corresponds to one planning decision.
@@ -64,7 +75,35 @@ def trial_metrics(trial, config):
             raise ValueError("Planning decisions and environment steps differ; cannot map steps-to-success")
         distance_keys = [k for k in data.files if k.endswith("distance_to_goal")]
         key = next((k for k in distance_keys if "push" in k), distance_keys[0] if distance_keys else None)
-        final_distance = float(data[key][-1]) if key else None
+        target_distances = np.asarray(data[key], dtype=float) if key else None
+        d0 = next((k for k in ("env_info_reach_d0", "reach_d0") if k in data.files), None)
+        target_start = float(np.asarray(data[d0]).ravel()[0]) if d0 else None
+        poses = np.asarray(data["poses"], dtype=float)[:, :3] if "poses" in data.files else None
+    # Two references for "distance to the goal":
+    #  goal_pose: where the end effector was when the goal image was rendered (poses[0]). This is what the planner
+    #             is asked to reach, since it only sees the goal image.
+    #  target:    the env's sampled target point (reach_goal_world), used by the env's reward. The env's expert
+    #             can stop short of it when rendering the goal (e.g. 11.7 cm in scene 0 seed 0), so even a perfect
+    #             image match can score far from 0.
+    pose_distances = pose_start = None
+    if poses is not None and len(poses) == len(rewards) + 2:  # [goal, start, after step 1..T]
+        pose_distances = np.linalg.norm(poses[2:] - poses[0], axis=1)
+        pose_start = float(np.linalg.norm(poses[1] - poses[0]))
+    reference = config.get("success_reference", "goal_pose")
+    if reference == "goal_pose" and pose_distances is not None:
+        distances, start_distance = pose_distances, pose_start
+    else:
+        reference = "target" if target_distances is not None else None
+        distances, start_distance = target_distances, target_start
+    final_distance = float(distances[-1]) if distances is not None else None
+    if config["task"] in REACH_TASKS and distances is not None:
+        # The env's success flag belongs to the host RoboCasa task the reach tasks reuse as a backdrop
+        # (CloseStandMixerHead), so it is always False here. Success = end effector within the threshold.
+        successes = distances <= config.get("success_distance", 0.05)
+    else:
+        successes = env_success
+    indices = np.flatnonzero(successes)
+    first_success = int(indices[0]) + 1 if len(indices) else None
     module_stats = {name: module_metrics([c for c in efficiency["calls"] if c["module"] == name]) for name in ("encoder", "predictor")}
     per_decision = []
     for d in decisions:
@@ -72,11 +111,17 @@ def trial_metrics(trial, config):
         per_decision.append({**d, "predictor": module_metrics(calls)})
     return {
         "seed": int(trial.name.split("_")[-1]), "task": config["task"], "model_size": config["model_size"],
-        "success": bool(len(indices)), "planning_steps_to_success": first_success,
+        "samples": config["samples"], "elites": config.get("elites"),
+        "success": bool(successes[-1]) if config["task"] in REACH_TASKS else bool(len(indices)), "success_any_step": bool(len(indices)), "env_success_any_step": bool(env_success.any()),
+        "planning_steps_to_success": first_success,
         "planning_steps_executed": len(decisions),
         "task_progress": float(rewards.mean() if config["task"] in ("reach", "object_reach") else rewards[-1]),
         "final_progress": float(rewards[-1]), "mean_progress": float(rewards.mean()),
-        "progress_by_step": rewards.tolist(), "final_distance_m": final_distance,
+        "progress_by_step": rewards.tolist(), "final_distance_m": final_distance, "start_distance_m": start_distance,
+        "distance_by_step": distances.tolist() if distances is not None else None, "distance_reference": reference,
+        "final_distance_goal_pose_m": float(pose_distances[-1]) if pose_distances is not None else None,
+        "final_distance_target_m": float(target_distances[-1]) if target_distances is not None else None,
+        "goal_pose_to_target_m": goal_gap(trial, poses),
         "planning_latency_total_s": sum(d["latency_s"] for d in decisions),
         "modules": module_stats, "decisions": per_decision,
     }
