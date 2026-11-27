@@ -37,6 +37,16 @@ iterations, horizon and seeds stay fixed; elites are a fixed 2% fraction with a 
 selects. Seeds run in the outer loop, so a partial ladder covers every N. A failed trial is recorded in
 `failure.json` and the ladder continues; `--resume` retries it.
 
+To add candidate counts to an existing ladder later, run again into the same directory with only the new N and the
+same other options, e.g. `run --preset full --model-size 100m --samples 256 512 --output results/ladder_100m`. Each N
+lives in its own `n<NNNN>/` subdirectory and the new counts are merged into `ladder.json`, so the report covers all of
+them.
+
+Cost: planning time is linear in N. Measured on one RTX 5090 (100M, ObstacleReach, 18 steps, horizon 5, CEM 15+10,
+fast planner), one predictor call at batch 16 takes ~57 ms and an episode takes 3.6 / 5.2 / 8.5 / 14.8 min at
+N = 16 / 32 / 64 / 128. Extrapolated: ~30 min at N=256, ~1 h at 512, ~1.6 h at 1024 per episode, so the full
+16..1024 preset with 10 episodes is about 1.5 GPU-days at 100M. Larger models cost more per call.
+
 `run` refreshes the report after every trial (`--no-report` turns this off), and `report` can be run at any time,
 also during a run: it reads only finished episodes and renders each episode's trajectory and video once
 (`--force` re-renders). `report` writes `<dir>/report/README.md` with the summary table (success with 95% Wilson interval, final distance
@@ -62,9 +72,9 @@ Every run contains `summary.json`, `trials.csv`, and `trial_<seed>/` directories
 
 | Metric | Definition |
 |---|---|
-| Success rate (SR) | Reach / ObjectReach / ObstacleReach: fraction of completed episodes whose **final** end-effector distance to the goal is ≤ `--success-distance` (default 5 cm, provisional). The simulator's own `success` flag is that of the host task these reach tasks reuse as a backdrop (CloseStandMixerHead), so it is always False; it is kept as `env_success_any_step`. Push: any simulator `success=True`. Failed runs are listed separately and excluded from SR. |
+| Success rate (SR) | Reach / ObjectReach / ObstacleReach: fraction of completed episodes whose **final** end-effector distance to the goal is ≤ `--success-distance` (default 5 cm, provisional). The goal is the end-effector position shown in the goal image (`--success-reference goal_pose`, default); `--success-reference target` uses the env's sampled target instead (see [goal image vs env target](#goal-image-vs-env-target)). The simulator's own `success` flag is that of the host task these reach tasks reuse as a backdrop (CloseStandMixerHead), so it is always False; it is kept as `env_success_any_step`. Push: any simulator `success=True`. Failed runs are listed separately and excluded from SR. |
 | Task progress | Upstream normalized reward: mean per-action reward for Reach/ObjectReach, final reward for ObstacleReach/Push. Final, mean, and per-step rewards are also saved. |
-| Final distance | End-effector distance to the goal after the last step (`reach_distance_to_goal`), metres; also saved per step. |
+| Final distance | End-effector distance (simulator world coordinates, metres) to the success reference after the last step; also saved per step (`distance_by_step`). Both variants are saved: `final_distance_goal_pose_m` and `final_distance_target_m` (the env's `reach_distance_to_goal`), plus the gap between the two goals, `goal_pose_to_target_m`. |
 | Steps to success | 1-based index of the first executed action that meets the success condition, which equals planning decision index with this runner's execution prefix/substeps both fixed to 1. Null for unsuccessful episodes; mean includes successes only. Episodes still run their fixed budget after first success. |
 | Output TPS | Sum of output visual latent tokens / sum of measured module forward times. One token is one embedding vector, excluding feature channels; predictor context output positions and all sampled candidates count. Not text tokens or successful robot actions. |
 | Predictor latency | Synchronized wall time around the predictor forward, excluding state preprocessing/transfers outside that call. Includes CPU dispatch and profiling overhead. Total across all sampled actions, batch-call mean, and total time / sample-forwards are saved. The last is amortized latency, **not** independently measured batch-1 latency. |
@@ -83,6 +93,16 @@ call). `--flops all` counts every forward (slow); `--flops off` disables countin
 
 `baselines/obstacle_band25_300m.json` preserves the completed local 300M budget ladder: scene 0, seeds 0–2, one episode each, 18 steps, horizon 5, 25–50 cm band, 3 cm clearance. At N=1024 final rewards were 0.7701, 0.0189, 0.9811 (mean 0.5901). The new runner preserves the original first-CEM reseeding rule, but isolates trials in separate processes and changes instrumentation; these are reference results, not bit-for-bit expectations or evidence of full paper reproduction. Raw old videos/checkpoints/logs remain outside this fork. The original sweep's summary included old defaults and is deliberately not the new summary.
 
+## Goal image vs env target
+
+The reach tasks build the goal live: the env samples a target point, drives the arm toward it with a scripted
+controller, and renders the goal image wherever the arm stops. The planner only sees that image, but the env's reward
+and `reach_distance_to_goal` measure distance to the sampled target. When the controller stops short (on ObstacleReach
+scene 0 this happens for 5 of seeds 0–9, by 12–20 cm, always vertically behind the obstacle), even perfect imitation of
+the goal image scores as a miss against the target. The runner therefore scores against the goal-image pose by default
+and reports the gap per episode (`goal_pose_to_target_m`, from `scene.json`). The gap also changes difficulty: goals
+where the arm stopped high are easier than goals at counter level. Compare methods only on the same seeds.
+
 ## Validation and development
 
 ```bash
@@ -90,6 +110,6 @@ python -m unittest discover -s experiments/tests -v
 python -m compileall -q experiments
 ```
 
-Unit tests cover task configuration, invalid budgets, FLOP counting/output preservation, token/memory aggregation, missing success flags, and success-only step counts. Use the smoke command in the [root README](../README.md#3-run-experiments) to validate your installed GPU/simulator environment. Full paper-scale results need a larger evaluation across scenes/seeds and have not been established by these smoke tests.
+Unit tests cover task configuration, invalid budgets, FLOP counting/output preservation (including count-once-per-shape), token/memory aggregation, missing success flags, success-only step counts, reach success from final distance (both references), and ladder/elite resolution. Use the smoke command in the [root README](../README.md#3-run-experiments) to validate your installed GPU/simulator environment. Full paper-scale results need a larger evaluation across scenes/seeds and have not been established by these smoke tests.
 
-Validation on the local RTX 5090: the original seven unit tests passed; a one-step ObstacleReach trial with FLOP counting, a two-step cached ObstacleReach trial, and two two-step Reach trials without FLOP counting completed successfully. Resume skipped both completed Reach trials. These reduced-budget runs validate the pipeline, not policy quality.
+Validation on the local RTX 5090: the original seven unit tests passed; a one-step ObstacleReach trial with FLOP counting, a two-step cached ObstacleReach trial, and two two-step Reach trials without FLOP counting completed successfully. Resume skipped both completed Reach trials. These reduced-budget runs validate the pipeline, not policy quality. Later, all 10 unit tests passed, the smoke ladder ran end to end, and a 100M ObstacleReach ladder (N = 16/32/64/128, seeds 0–9) completed with no failed trials.

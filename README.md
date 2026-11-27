@@ -83,7 +83,7 @@ python -m experiments run --preset full --model-size 100m --output outputs/ladde
 python -m experiments report outputs/ladder-100m      # -> outputs/ladder-100m/report/README.md
 ```
 
-See [candidates ladder and report](experiments/README.md#candidates-ladder-and-report).
+See [candidates ladder and report](experiments/README.md#candidates-ladder-and-report) (adding N to an existing ladder, cost per episode).
 
 Each trial runs one episode with a distinct task seed; the scene stays fixed. Encoder and predictor weights remain frozen. Runs use a single GPU in eager mode. Download the corresponding checkpoints before switching model sizes.
 
@@ -106,6 +106,7 @@ A failed trial is recorded in `failure.json` and the run continues. Repeat the s
 | `--output` | Run directory for metrics, logs, and trajectories | Required |
 | `--flops` | `once` per input shape (cheap), `all` (slow), or `off` | `once` |
 | `--success-distance` | Reach tasks: success if the final distance to the goal is at most this (m) | `0.05` |
+| `--success-reference` | Reach tasks: measure distance to the goal-image pose (`goal_pose`) or the env's sampled target (`target`) | `goal_pose` |
 | `--no-fast-planner` | Keep the stock planner's per-batch `gc.collect()` and GPU->CPU state copy | fast planner on |
 
 Additional flags control checkpoint selection, objects, obstacle distances, GPU, ports, timeouts, and CEM iteration counts. Inspect them with `python -m experiments run --help`.
