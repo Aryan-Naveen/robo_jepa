@@ -85,6 +85,8 @@ python -m experiments report outputs/ladder-100m      # -> outputs/ladder-100m/r
 
 See [candidates ladder and report](experiments/README.md#candidates-ladder-and-report) (adding N to an existing ladder, cost per episode).
 
+**Preliminary results:** [100M ObstacleReach ladder, N = 16–128, 10 seeds](reports/obstacle_reach_100m_n16-128/README.md) (success, planning time, trajectories with the obstacle).
+
 Each trial runs one episode with a distinct task seed; the scene stays fixed. Encoder and predictor weights remain frozen. Runs use a single GPU in eager mode. Download the corresponding checkpoints before switching model sizes.
 
 A failed trial is recorded in `failure.json` and the run continues. Repeat the same command with `--resume` to retry it and skip completed trials. Resume requires identical settings and unchanged checkpoint files. For concurrent runs, choose distinct output directories, `--port`, and `--master-port` values.
@@ -138,6 +140,7 @@ Success rate excludes trials that failed to execute, so check completed/requeste
 ## Reference and validation
 
 - [Experiment reference](experiments/README.md): task defaults, metric definitions, execution behavior, and previous results.
+- [Preliminary report: 100M ObstacleReach ladder](reports/obstacle_reach_100m_n16-128/README.md): success and planning time for N = 16–128 candidates per CEM iteration, 10 seeds.
 - [Historical ObstacleReach baseline](experiments/baselines/obstacle_band25_300m.json): the local 300M sample-budget ladder.
 - [Original repository](https://github.com/facebookresearch/robo_jepa): upstream research, checkpoints, and training documentation.
 - [License](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).
