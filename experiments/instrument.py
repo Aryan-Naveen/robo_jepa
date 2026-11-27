@@ -19,8 +19,13 @@ from .runner import ROOT, write_json
 
 
 class Recorder:
-    def __init__(self, count_flops=True):
-        self.count_flops = count_flops
+    """Times every encoder/predictor forward. FLOPs: "off", "once" (count the first forward of each input shape and
+    reuse that count for later forwards of the same shape; the counted forwards are flagged and left out of latency
+    statistics because FlopCounterMode slows them down), or "all" (count every forward; slow)."""
+
+    def __init__(self, flops="once"):
+        self.flops_mode = flops
+        self.flop_cache = {}
         self.calls = []
         self.decisions = []
         self.decision = None
@@ -36,7 +41,9 @@ class Recorder:
                 torch.cuda.reset_peak_memory_stats(tensor.device)
             else:
                 before = 0
-            counter = FlopCounterMode(display=False) if self.count_flops else None
+            key = (module, tuple(tensor.shape), kwargs.get("cache_size"))
+            count = self.flops_mode == "all" or (self.flops_mode == "once" and key not in self.flop_cache)
+            counter = FlopCounterMode(display=False) if count else None
             start = time.perf_counter()
             with counter if counter is not None else nullcontext():
                 output = function(*args, **kwargs)
@@ -49,11 +56,14 @@ class Recorder:
             tokens = features.numel() // features.shape[-1]
             after = torch.cuda.memory_allocated(tensor.device) if cuda else 0
             peak = torch.cuda.max_memory_allocated(tensor.device) if cuda else 0
+            flops = counter.get_total_flops() if counter is not None else self.flop_cache.get(key)
+            if counter is not None:
+                self.flop_cache[key] = flops
             self.calls.append({
                 "module": module, "decision": self.decision, "batch_size": batch,
                 "output_tokens": tokens, "latency_s": elapsed,
                 "amortized_sample_latency_s": elapsed / batch,
-                "flops": counter.get_total_flops() if counter is not None else None,
+                "flops": flops, "flops_counted": counter is not None,
                 "allocated_before_bytes": before if cuda else None,
                 "allocated_after_bytes": after if cuda else None,
                 "peak_allocated_bytes": peak if cuda else None,
@@ -63,8 +73,49 @@ class Recorder:
         return measured
 
     def dump(self, path):
-        write_json(path, {"schema_version": 1, "count_flops": self.count_flops,
+        write_json(path, {"schema_version": 2, "flops_mode": self.flops_mode,
                           "calls": self.calls, "decisions": self.decisions})
+
+
+SCENE_KEYS = ("pose", "proprio_robocasa", "success")
+
+
+def small(value):
+    """JSON-friendly copy of a scalar / short vector / string, else None (images and long arrays are skipped)."""
+    if isinstance(value, (str, bool, int, float)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray) and value.size <= 32 and value.dtype.kind in "biuf":
+        return value.tolist()
+    return None
+
+
+def capture_scene(trial):
+    """Save what the env reports at reset (start/goal positions, obstacle footprint, base pose) to scene.json and
+    the goal camera images to goal_img_<i>.png, for the report's trajectory and video panels."""
+    import imageio.v2 as imageio
+    from gym_tcp import GymEnvClient
+
+    original_reset = GymEnvClient.reset
+    scene = {}
+
+    def reset(self, **kwargs):
+        result = original_reset(self, **kwargs)
+        obs = result[0] if isinstance(result, (tuple, list)) else result  # msgpack returns lists
+        mode = kwargs.get("mode", "init")
+        if isinstance(obs, dict):
+            keep = {k: small(v) for k, v in obs.items()
+                    if k in SCENE_KEYS or k.startswith(("obstacle_", "reach_", "object_"))}
+            scene[mode] = {k: v for k, v in keep.items() if v is not None}
+            if mode == "goal":
+                for k, v in obs.items():
+                    if k.startswith("img_") and isinstance(v, np.ndarray) and v.ndim == 3:
+                        imageio.imwrite(trial / f"goal_{k}.png", v.astype(np.uint8))
+            write_json(trial / "scene.json", scene)
+        return result
+
+    GymEnvClient.reset = reset
 
 
 def main():
@@ -78,7 +129,11 @@ def main():
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     torch.set_grad_enabled(False)
-    recorder = Recorder(os.environ.get("EXPERIMENT_COUNT_FLOPS", "1") == "1")
+    recorder = Recorder(os.environ.get("EXPERIMENT_FLOPS", "once"))
+    if os.environ.get("EXPERIMENT_FAST_PLANNER", "1") == "1":
+        from . import fast_planner
+        fast_planner.apply()
+    capture_scene(trial)
     stats = trial / "efficiency.json"
     atexit.register(recorder.dump, stats)
     original_load = WorldModel.load_pretrained.__func__

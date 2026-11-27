@@ -76,11 +76,20 @@ python -m experiments run --task obstacle_reach --model-size 300m --trials 3 \
   --models-dir models --output outputs/obstacle-300m --resume
 
 python -m experiments summarize outputs/obstacle-300m
+
+# Candidates-per-iteration ladder: quick check first, then the full run; then tables, plots and videos
+python -m experiments run --preset smoke --model-size 100m --output outputs/ladder-smoke
+python -m experiments run --preset full --model-size 100m --output outputs/ladder-100m
+python -m experiments report outputs/ladder-100m      # -> outputs/ladder-100m/report/README.md
 ```
+
+See [candidates ladder and report](experiments/README.md#candidates-ladder-and-report) (adding N to an existing ladder, cost per episode).
+
+**Preliminary results:** [100M ObstacleReach ladder, N = 16–512, vs 300M at N = 64, 10 seeds](reports/obstacle_reach_100m_n16-512/README.md) (success, planning time, trajectories with the obstacle).
 
 Each trial runs one episode with a distinct task seed; the scene stays fixed. Encoder and predictor weights remain frozen. Runs use a single GPU in eager mode. Download the corresponding checkpoints before switching model sizes.
 
-A failed trial stops the run. Repeat the same command with `--resume` to retry it and skip completed trials. Resume requires identical settings and unchanged checkpoint files. For concurrent runs, choose distinct output directories, `--port`, and `--master-port` values.
+A failed trial is recorded in `failure.json` and the run continues. Repeat the same command with `--resume` to retry it and skip completed trials. Resume requires identical settings and unchanged checkpoint files. For concurrent runs, choose distinct output directories, `--port`, and `--master-port` values.
 
 ## Configure a run
 
@@ -90,13 +99,17 @@ A failed trial stops the run. Repeat the same command with `--resume` to retry i
 | `--model-size` | Frozen predictor size, from `22m` through `8b` | `300m` |
 | `--trials` | Number of episodes, one per task seed | `3` |
 | `--scene` / `--seed` | Fixed kitchen and first task/planner seed | Scene `0` (`4` for push), seed `0` |
-| `--samples` | Total CEM candidates per iteration | `1024` |
+| `--preset` | `smoke` (quick pipeline check) or `full` (candidates ladder); fills only unset options | none |
+| `--samples` | Total CEM candidates per iteration; several values run a ladder | `1024` |
 | `--batch-size` | Candidates evaluated together; must divide `--samples` | `16` |
 | `--planning-steps` | Maximum executed planning decisions | `18` for obstacle/push, `5` otherwise |
 | `--horizon` | Predicted rollout length | `5` for obstacle/push, `1` otherwise |
 | `--models-dir` | Directory containing downloaded model folders | `models` |
 | `--output` | Run directory for metrics, logs, and trajectories | Required |
-| `--no-count-flops` | Disable FLOP profiling for latency-focused runs | FLOP counting enabled |
+| `--flops` | `once` per input shape (cheap), `all` (slow), or `off` | `once` |
+| `--success-distance` | Reach tasks: success if the final distance to the goal is at most this (m) | `0.05` |
+| `--success-reference` | Reach tasks: measure distance to the goal-image pose (`goal_pose`) or the env's sampled target (`target`) | `goal_pose` |
+| `--no-fast-planner` | Keep the stock planner's per-batch `gc.collect()` and GPU->CPU state copy | fast planner on |
 
 Additional flags control checkpoint selection, objects, obstacle distances, GPU, ports, timeouts, and CEM iteration counts. Inspect them with `python -m experiments run --help`.
 
@@ -120,13 +133,14 @@ outputs/obstacle-300m/
     └── episode_*.npz / *.mp4     # trajectory and videos
 ```
 
-Robot metrics include **success rate (SR)**, **task progress**, and **planning steps to first success**. Encoder and predictor metrics include **output tokens/second**, **average/peak GPU allocation**, **FLOPs/MACs**, and **forward latency** across batches and amortized per sample.
+Robot metrics include **success rate (SR)**, **final distance to the goal**, **task progress**, and **planning steps to first success**. Encoder and predictor metrics include **output tokens/second**, **average/peak GPU allocation**, **FLOPs/MACs**, and **forward latency** across batches and amortized per sample.
 
-Success rate excludes trials that failed to execute, so check completed/requested trial counts. Tokens are visual latent embeddings; per-sample latency is amortized batch latency. Average memory is sampled at call boundaries, and peak memory includes other tensors resident in the planner process. FLOP profiling adds overhead; use `--no-count-flops` for a separate timing run. See [precise metric definitions](experiments/README.md#outputs-and-metric-definitions) before comparing results.
+Success rate excludes trials that failed to execute, so check completed/requested trial counts. Tokens are visual latent embeddings; per-sample latency is amortized batch latency. Average memory is sampled at call boundaries, and peak memory includes other tensors resident in the planner process. FLOPs are counted once per input shape and those calls are excluded from latency statistics. See [precise metric definitions](experiments/README.md#outputs-and-metric-definitions) before comparing results.
 
 ## Reference and validation
 
 - [Experiment reference](experiments/README.md): task defaults, metric definitions, execution behavior, and previous results.
+- [Preliminary report: 100M ObstacleReach ladder](reports/obstacle_reach_100m_n16-512/README.md): success and planning time for N = 16–512 candidates per CEM iteration, 10 seeds, plus a 300M comparison at N=64.
 - [Historical ObstacleReach baseline](experiments/baselines/obstacle_band25_300m.json): the local 300M sample-budget ladder.
 - [Original repository](https://github.com/facebookresearch/robo_jepa): upstream research, checkpoints, and training documentation.
 - [License](LICENSE) and [third-party notices](THIRD_PARTY_NOTICES.md).

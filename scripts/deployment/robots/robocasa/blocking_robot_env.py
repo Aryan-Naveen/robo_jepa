@@ -812,6 +812,9 @@ class ObstacleReachBlockingRoboCasaEnv(ReachBlockingRoboCasaEnv):
         obs["obstacle_y_half_extent_m"] = float(meta["y_half_extent_m"])
         obs["obstacle_world_top_z"] = float(meta.get("world_top_z", meta["world_pos"][2]))
         obs["obstacle_offaxis_y_base_m"] = float(meta.get("offaxis_y_base_m", 0.0))
+        # Base-frame footprint along x (with the y bounds below: the obstacle's top-down box, used by reports).
+        obs["obstacle_x_half_extent_m"] = float(meta.get("x_half_extent_m", 0.0))
+        obs["obstacle_x_base_m"] = float(meta.get("x_base_m", 0.0))
         if "y_base_min" in meta:
             obs["obstacle_y_base_min"] = float(meta["y_base_min"])
             obs["obstacle_y_base_max"] = float(meta["y_base_max"])

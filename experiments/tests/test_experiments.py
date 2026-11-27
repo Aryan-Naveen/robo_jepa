@@ -6,12 +6,16 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from experiments.runner import commands, parser, resolve, task_spec, write_json
+from experiments.runner import commands, elites, ladder, parser, task_spec, write_json
 from experiments.metrics import module_metrics, summarize, trial_metrics
 
 
+def configs(*args):
+    return ladder(parser().parse_args(["run", "--output", "/tmp/test-experiment", *args]))
+
+
 def config(*args):
-    return resolve(parser().parse_args(["run", "--output", "/tmp/test-experiment", *args]))
+    return configs(*args)[0]
 
 
 def call(decision=1):
@@ -60,7 +64,8 @@ class ExperimentsTest(unittest.TestCase):
     def test_success_steps_and_failed_trial_denominator(self):
         with tempfile.TemporaryDirectory() as td:
             out = Path(td)
-            c = config("--trials", "3")
+            # push: success is the simulator's flag at any step
+            c = config("--task", "push", "--trials", "3")
             write_json(out / "config.json", c)
             for seed, success in [(0, [False, True, False]), (1, [False] * 3)]:
                 trial = out / f"trial_{seed:05d}"
@@ -80,6 +85,57 @@ class ExperimentsTest(unittest.TestCase):
             self.assertEqual(s["mean_planning_steps_to_success"], 2)
             self.assertEqual(s["failed_seeds"], [2])
             self.assertTrue((out / "trials.csv").exists())
+
+    def test_reach_success_is_final_distance(self):
+        with tempfile.TemporaryDirectory() as td:
+            trial = Path(td) / "trial_00000"
+            trial.mkdir()
+            c = config("--success-distance", "0.05", "--success-reference", "target")
+            # the host task's flag is always False; a dip below 5 cm that ends at 7 cm is not a success
+            np.savez(trial / "episode_task_0.npz", env_rewards=[0.2, 0.9, 0.8], env_info_success=[False] * 3,
+                     env_info_reach_distance_to_goal=[0.3, 0.04, 0.07], env_info_reach_d0=[0.4] * 3)
+            write_json(trial / "efficiency.json", {"calls": [], "decisions": [dict(index=i, latency_s=0.3) for i in (1, 2, 3)]})
+            m = trial_metrics(trial, c)
+            self.assertFalse(m["success"])
+            self.assertTrue(m["success_any_step"])
+            self.assertEqual((m["final_distance_m"], m["start_distance_m"], m["planning_steps_to_success"]), (0.07, 0.4, 2))
+            # goal_pose reference: distance to the pose where the goal image was taken (poses[0])
+            poses = np.zeros((5, 7))
+            poses[0, :3] = [1, 0, 0]
+            poses[1:, 0] = [0.5, 0.9, 0.95, 0.97]
+            np.savez(trial / "episode_task_0.npz", env_rewards=[0.2, 0.9, 0.8], env_info_success=[False] * 3,
+                     env_info_reach_distance_to_goal=[0.3, 0.04, 0.07], env_info_reach_d0=[0.4] * 3, poses=poses)
+            m = trial_metrics(trial, config())
+            self.assertEqual(m["distance_reference"], "goal_pose")
+            self.assertAlmostEqual(m["final_distance_m"], 0.03)
+            self.assertAlmostEqual(m["start_distance_m"], 0.5)
+            self.assertTrue(m["success"])
+            self.assertEqual(m["final_distance_target_m"], 0.07)
+
+    def test_ladder_and_elites(self):
+        cs = configs("--preset", "smoke")
+        self.assertEqual([c["samples"] for c in cs], [16, 64, 256])
+        self.assertEqual({(c["trials"], c["planning_steps"], c["cem_iterations"]) for c in cs}, {(1, 6, 3)})
+        self.assertTrue(cs[0]["output"].endswith("n0016"))
+        # explicit options beat the preset
+        self.assertEqual(config("--preset", "smoke", "--samples", "32", "--trials", "2")["trials"], 2)
+        self.assertEqual([elites(n, 0.02, 4) for n in (4, 16, 64, 256, 512, 1024)], [2, 4, 4, 5, 10, 20])
+        server, planner = commands(config("--samples", "1024"), Path("/tmp/trial"))
+        self.assertEqual(planner[planner.index("--cutoff") + 1], "20")
+        self.assertEqual(config("--samples", "8")["batch_size"], 8)
+
+    def test_flops_counted_once_per_shape(self):
+        import torch
+        from experiments.instrument import Recorder
+        layer = torch.nn.Linear(10, 20, bias=False)
+        r = Recorder("once")
+        f = r.wrap(layer, "encoder")
+        for _ in range(3):
+            f(torch.ones(2, 10))
+        self.assertEqual([c["flops_counted"] for c in r.calls], [True, False, False])
+        self.assertEqual([c["flops"] for c in r.calls], [800] * 3)
+        m = module_metrics(r.calls)
+        self.assertEqual((m["timed_calls"], m["flops"]), (2, 2400))
 
     def test_missing_success_is_not_failure(self):
         with tempfile.TemporaryDirectory() as td:
