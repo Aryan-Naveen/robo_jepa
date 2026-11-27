@@ -90,6 +90,9 @@ def parser():
     rep.add_argument("output", type=Path)
     rep.add_argument("--no-videos", action="store_true", help="skip the per-episode videos (faster)")
     rep.add_argument("--force", action="store_true", help="re-render per-episode trajectories and videos")
+    rep.add_argument("--compare", type=Path, nargs="*", default=None,
+                     help="other runs or ladders (e.g. another model size, same seeds) shown alongside; saved for "
+                          "later refreshes; pass with no value to clear")
     return p
 
 
@@ -314,7 +317,7 @@ def main():
         return
     if a.command == "report":
         from .report import report
-        report(a.output.resolve(), videos=not a.no_videos, force=a.force)
+        report(a.output.resolve(), videos=not a.no_videos, force=a.force, compare=a.compare)
         return
     try:
         configs = ladder(a)

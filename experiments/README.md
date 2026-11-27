@@ -49,12 +49,18 @@ N = 16 / 32 / 64 / 128. Extrapolated: ~30 min at N=256, ~1 h at 512, ~1.6 h at 1
 
 `run` refreshes the report after every trial (`--no-report` turns this off), and `report` can be run at any time,
 also during a run: it reads only finished episodes and renders each episode's trajectory and video once
-(`--force` re-renders). `report` writes `<dir>/report/README.md` with the summary table (success with 95% Wilson interval, final distance
-median/IQR, planning and predictor seconds per decision, ms per predictor call), the plots `time_vs_samples.png`,
+(`--force` re-renders). `report` writes `<dir>/report/README.md` with the summary table (success at `--success-distance` and at looser 10 and 15 cm thresholds, each with a 95% Wilson interval;
+final distance mean ± SD and median/IQR, planning and predictor seconds per decision, ms per predictor call), the plots `time_vs_samples.png`,
 `success_vs_samples.png`, `success_vs_time.png`, `distance_vs_step.png`, `trajectories.png` (top-down paths with the
 obstacle, episodes x N), and per episode `episodes/<run>_seed<k>/trajectory.png` (top-down + side view) and
 `video.mp4` (goal and current camera images, path so far, distance curve). The obstacle footprint and goal come
 from the env's reset observation, saved per trial in `scene.json`.
+
+`report --compare <run or ladder> ...` adds other runs, typically another model size on the same seeds, as extra
+rows in the tables, ◆ markers in the success, distance and time plots, and extra columns in the trajectory grid. The
+report states which settings differ, if any. The list is saved in `report/report.json`, so later refreshes (including
+the automatic one during `run`) keep it; `--compare` with no value clears it. Example:
+`python -m experiments report results/ladder_100m --compare results/ladder_300m/n0064`.
 
 Planner overhead fixes (`--fast-planner`, on by default; `experiments/fast_planner.py`): the rollout state stays on
 the GPU instead of a ~64 MB GPU->CPU copy per step, and the per-batch `gc.collect()` (~0.16 s) is skipped. Numerics

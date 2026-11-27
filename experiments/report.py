@@ -3,10 +3,12 @@
 
 """Human-readable report for one run or a candidates-per-iteration ladder.
 
-    python -m experiments report results/<run-or-ladder>
+    python -m experiments report results/<run-or-ladder> [--compare results/<other run or ladder> ...]
 
 Works on partial results (only finished episodes are read), and `run` refreshes it after every trial. Per-episode
-trajectory and video files are rendered once; `--force` re-renders them.
+trajectory and video files are rendered once; `--force` re-renders them. `--compare` adds other runs (e.g. another
+model size on the same seeds) as extra rows, points and columns; the list is saved in report/report.json so the
+automatic refresh during `run` keeps it.
 
 writes <dir>/report/:
     README.md                 summary table (one row per candidate count) and links to everything below
@@ -21,6 +23,7 @@ writes <dir>/report/:
 import csv
 import json
 import math
+import os
 from pathlib import Path
 
 import numpy as np
@@ -31,6 +34,29 @@ SURFACE, INK, INK2, GRID = "#fcfcfb", "#0b0b0b", "#52514e", "#e4e3df"
 RAMP = ["#86b6ef", "#5598e7", "#3987e5", "#2a78d6", "#256abf", "#1c5cab", "#184f95", "#104281", "#0d366b"]
 BLUE, ORANGE, AQUA, RED = "#2a78d6", "#eb6834", "#1baf7a", "#e34948"
 OBSTACLE = "#9a9890"
+VIOLET = "#6250d6"  # comparison runs (e.g. another model size)
+EXTRA_DISTANCES_M = (0.10, 0.15)  # looser secondary success thresholds, shown next to the primary --success-distance
+THRESHOLD_COLORS = [RAMP[8], RAMP[4], RAMP[1]]  # primary (dark) -> loosest (light)
+COMPARE_KEYS = ("task", "scene", "seed", "trials", "planning_steps", "horizon", "cem_iterations",
+                "later_cem_iterations", "batch_size", "elite_fraction", "min_elites", "success_distance",
+                "success_reference", "fast_planner")
+
+
+def thresholds_m(primary):
+    return [primary] + [d for d in EXTRA_DISTANCES_M if d > primary + 1e-9]
+
+
+def tkey(d):
+    return f"le{round(100 * d)}cm"
+
+
+def success_series(row):
+    """(threshold cm, count key, rate key, ci-low key, ci-high key) for the primary and each extra threshold."""
+    out = [(100 * row["success_distance_m"], "successes", "success_rate", "success_ci_low", "success_ci_high")]
+    for d in thresholds_m(row["success_distance_m"])[1:]:
+        t = tkey(d)
+        out.append((100 * d, f"successes_{t}", f"success_rate_{t}", f"success_{t}_ci_low", f"success_{t}_ci_high"))
+    return out
 
 
 def load_runs(root):
@@ -102,6 +128,13 @@ def run_row(run):
     k = sum(e["success"] for e in eps)
     lo, hi = wilson(k, n)
     dist = np.array([e["final_distance_m"] for e in eps if e["final_distance_m"] is not None], dtype=float)
+    extra = {}
+    for d in thresholds_m(c.get("success_distance", 0.05))[1:]:
+        k_d = int(sum(x <= d for x in dist))
+        lo_d, hi_d = wilson(k_d, n)
+        t = tkey(d)
+        extra.update({f"successes_{t}": k_d, f"success_rate_{t}": k_d / n if n else math.nan,
+                      f"success_{t}_ci_low": lo_d, f"success_{t}_ci_high": hi_d})
     plan = np.array([per_decision_s(e) for e in eps])
     pred = np.array([predictor_s_per_decision(e) for e in eps])
     calls = [e["modules"]["predictor"] for e in eps if e["modules"]["predictor"]]
@@ -109,10 +142,14 @@ def run_row(run):
     flops = [p["flops"] for p in calls if p["flops"] is not None]
     steps = sum(e["planning_steps_executed"] for e in eps)
     return {
-        "run": run["name"], "samples": c["samples"], "batch_size": c["batch_size"],
+        "run": run["name"], "label": run.get("label", run["name"]), "model": c["model_size"],
+        "compare": run.get("compare", False), "samples": c["samples"], "batch_size": c["batch_size"],
         "batches": c["samples"] // c["batch_size"], "elites": c.get("elites"), "episodes": n,
         "failed": len(run["failed"]), "successes": k, "success_rate": k / n if n else math.nan,
         "success_ci_low": lo, "success_ci_high": hi, "success_distance_m": c.get("success_distance", 0.05),
+        **extra,
+        "final_distance_mean_m": float(dist.mean()) if len(dist) else math.nan,
+        "final_distance_sd_m": float(dist.std(ddof=1)) if len(dist) > 1 else math.nan,
         "final_distance_median_m": float(np.median(dist)) if len(dist) else math.nan,
         "final_distance_q1_m": float(np.percentile(dist, 25)) if len(dist) else math.nan,
         "final_distance_q3_m": float(np.percentile(dist, 75)) if len(dist) else math.nan,
@@ -174,7 +211,7 @@ def setting_text(run):
 
 # ---------------------------------------------------------------- ladder plots
 
-def plot_time(plt, runs, rows, out):
+def plot_time(plt, runs, rows, out, cmp_rows=()):
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     xs = [r["samples"] for r in rows]
     for run in runs:
@@ -188,7 +225,10 @@ def plot_time(plt, runs, rows, out):
         # Reference: time exactly proportional to N, anchored at the largest N.
         ref = rows[-1]["planning_s_per_decision"]
         ax.plot(xs, [ref * x / xs[-1] for x in xs], "--", color=INK2, linewidth=1, label="∝ N (reference)")
-    log2_axis(ax, xs)
+    for r in cmp_rows:
+        ax.scatter(r["samples"], r["planning_s_per_decision"], marker="D", s=46, color=VIOLET, zorder=4,
+                   label=f"{r['label']} planning")
+    log2_axis(ax, sorted({*xs, *(r["samples"] for r in cmp_rows)}))
     ax.set_yscale("log")
     ax.set_xlabel("candidate action sequences per CEM iteration (N)")
     ax.set_ylabel("seconds per decision (log)")
@@ -200,22 +240,43 @@ def plot_time(plt, runs, rows, out):
     plt.close(fig)
 
 
-def success_panels(plt, runs, rows, xkey, xlabel, title, path, log_x):
-    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10, 4.2))
+def success_panels(plt, runs, rows, xkey, xlabel, title, path, log_x, cmp_runs=(), cmp_rows=()):
+    from matplotlib.lines import Line2D
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(10.5, 4.4))
     xs = [r[xkey] for r in rows]
-    sr = np.array([r["success_rate"] for r in rows])
-    lo = np.array([r["success_ci_low"] for r in rows])
-    hi = np.array([r["success_ci_high"] for r in rows])
-    a1.fill_between(xs, lo, hi, color=BLUE, alpha=0.12, linewidth=0)
-    a1.plot(xs, sr, "-o", color=BLUE)
-    for x, r in zip(xs, rows):
-        a1.annotate(f"{r['successes']}/{r['episodes']}", (x, r["success_rate"]), textcoords="offset points",
-                    xytext=(0, 7), ha="center", fontsize=8, color=INK2)
+    series = success_series(rows[0])
+    for i in reversed(range(len(series))):  # loosest first, primary drawn on top
+        cm, k, rate, lo_k, hi_k = series[i]
+        color = THRESHOLD_COLORS[i]
+        a1.fill_between(xs, [r[lo_k] for r in rows], [r[hi_k] for r in rows], color=color, alpha=0.08, linewidth=0)
+        a1.plot(xs, [r[rate] for r in rows], "-o", color=color, label=f"final distance ≤ {cm:.0f} cm",
+                zorder=3 + len(series) - i, markersize=4 + 1.5 * i)
+        for x, r in zip(xs, rows):
+            if i and r[k] == r[series[i - 1][1]]:
+                continue  # same count as the next stricter threshold: one label is enough
+            a1.annotate(f"{r[k]}/{r['episodes']}", (x, r[rate]), textcoords="offset points",
+                        xytext=(0, 7 if i == 0 else -12), ha="center", fontsize=8, color=INK2)
+    for r in cmp_rows:
+        x = r[xkey]
+        for i, (cm, k, rate, _, _) in enumerate(series):
+            a1.scatter(x, r[rate], marker="D", s=48, facecolor=THRESHOLD_COLORS[i], edgecolor=VIOLET,
+                       linewidths=1.8, zorder=8)
+            if i and r[k] == r[series[i - 1][1]]:
+                continue
+            a1.annotate(f"{r[k]}/{r['episodes']}", (x, r[rate]), textcoords="offset points", xytext=(8, -3),
+                        ha="left", fontsize=8, color=VIOLET)
+    handles, labels = a1.get_legend_handles_labels()
+    handles, labels = handles[::-1], labels[::-1]
+    for r in cmp_rows:
+        handles.append(Line2D([], [], marker="D", linestyle="none", markerfacecolor="white", markeredgecolor=VIOLET,
+                              markeredgewidth=1.8, markersize=7))
+        labels.append(f"{r['label']} (fill = threshold)")
+    a1.legend(handles, labels, loc="upper left")
     a1.set_ylim(-0.03, 1.08)
-    a1.set_ylabel(f"success rate (final distance ≤ {100 * rows[0]['success_distance_m']:.0f} cm)")
+    a1.set_ylabel("success rate")
     fig.text(0.01, 0.955, f"distance measured {ref_text(rows)}", fontsize=8, color=INK2)
     a1.set_title(title)
-    # Final distance: one thin gray line per episode seed (paired across N), dots, median.
+    # Final distance: one thin gray line per episode seed (paired across N), dots, median and mean.
     by_seed = {}
     for run, x in zip(runs, xs):
         for e in run["episodes"]:
@@ -226,26 +287,36 @@ def success_panels(plt, runs, rows, xkey, xlabel, title, path, log_x):
         a2.plot(*zip(*pts), color=GRID, linewidth=1, zorder=1)
     a2.plot(xs, [100 * r["final_distance_median_m"] for r in rows], "-o", color=INK, linewidth=1.5,
             markersize=4, label="median", zorder=4)
-    a2.axhline(100 * rows[0]["success_distance_m"], color=AQUA, linestyle="--", linewidth=1.2,
-               label="success threshold")
+    a2.plot(xs, [100 * r["final_distance_mean_m"] for r in rows], "--s", color=INK2, linewidth=1.5,
+            markersize=4, label="mean", zorder=4)
+    for run, r in zip(cmp_runs, cmp_rows):
+        x = r[xkey]
+        a2.scatter([x] * len(run["episodes"]), [100 * e["final_distance_m"] for e in run["episodes"]], s=16,
+                   color=VIOLET, alpha=0.6, linewidths=0, zorder=5)
+        a2.scatter(x, 100 * r["final_distance_median_m"], marker="D", s=48, color=VIOLET, zorder=6,
+                   label=f"{r['label']} median")
+        a2.scatter(x, 100 * r["final_distance_mean_m"], marker="s", s=44, facecolor="white", edgecolor=VIOLET,
+                   linewidths=1.8, zorder=6, label=f"{r['label']} mean")
+    for i, (cm, *_) in enumerate(series):
+        a2.axhline(cm, color=THRESHOLD_COLORS[i], linestyle=":", linewidth=1.2, label=f"{cm:.0f} cm")
     a2.set_ylim(bottom=0)
     a2.set_ylabel(f"final distance {ref_text(rows)} (cm)")
     a2.set_title("Final distance (gray lines join the same episode)")
-    a2.legend(loc="upper right")
+    a2.legend(loc="upper right", fontsize=7.5)
     for ax in (a1, a2):
         if log_x:
-            log2_axis(ax, xs)
+            log2_axis(ax, sorted({*xs, *(r[xkey] for r in cmp_rows)}))
         ax.set_xlabel(xlabel)
-    subtitle(fig, setting_text(runs[0]) + "  ·  band: 95% Wilson interval")
+    subtitle(fig, setting_text(runs[0]) + "  ·  bands: 95% Wilson interval")
     fig.tight_layout(rect=(0, 0.04, 1, 0.95))
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def plot_distance_steps(plt, runs, out):
+def plot_distance_steps(plt, runs, out, cmp_runs=()):
     fig, ax = plt.subplots(figsize=(6.4, 4.2))
     cols = colors_for([r["config"]["samples"] for r in runs])
-    for run in runs:
+    for run in [*runs, *cmp_runs]:
         curves = [e["distance_by_step"] for e in run["episodes"] if e.get("distance_by_step")]
         if not curves:
             continue
@@ -254,8 +325,14 @@ def plot_distance_steps(plt, runs, out):
         start = [100 * e["start_distance_m"] for e in run["episodes"] if e.get("start_distance_m")]
         x = np.arange(0, L + 1)
         y = np.concatenate([[np.mean(start) if start else np.nan], arr.mean(0)])
-        ax.plot(x, y, "-", color=cols[run["config"]["samples"]], label=f"N = {run['config']['samples']}")
-    ax.axhline(100 * runs[0]["config"].get("success_distance", 0.05), color=AQUA, linestyle="--", linewidth=1.2)
+        if run.get("compare"):
+            ax.plot(x, y, "--", color=VIOLET, label=run["label"])
+        else:
+            ax.plot(x, y, "-", color=cols[run["config"]["samples"]], label=f"N = {run['config']['samples']}")
+    for d, style in zip(thresholds_m(runs[0]["config"].get("success_distance", 0.05)), ["--", ":", (0, (1, 4))]):
+        ax.axhline(100 * d, color=AQUA, linestyle=style, linewidth=1.2)
+        ax.annotate(f"{100 * d:.0f} cm", (1, 100 * d), xycoords=("axes fraction", "data"), xytext=(-2, 2),
+                    textcoords="offset points", ha="right", fontsize=7.5, color=INK2)
     ax.set_xlabel("executed step")
     ax.set_ylabel(f"mean distance {REFERENCE.get(runs[0]['episodes'][0].get('distance_reference'), 'to the goal')} (cm)")
     ax.set_ylim(bottom=0)
@@ -340,7 +417,7 @@ def plot_trajectory_grid(plt, runs, out):
     seeds = sorted({e["seed"] for r in runs for e in r["episodes"]})
     if not seeds:
         return False
-    cols = colors_for([r["config"]["samples"] for r in runs])
+    cols = colors_for([r["config"]["samples"] for r in runs if not r.get("compare")])
     fig, axes = plt.subplots(len(seeds), len(runs), figsize=(max(5.0, 2.3 * len(runs) + 0.6), 2.3 * len(seeds) + 1.0),
                              squeeze=False)
     for j, run in enumerate(runs):
@@ -354,7 +431,8 @@ def plot_trajectory_grid(plt, runs, out):
                 side.set_visible(True)
                 side.set_color(GRID)
             if i == 0:
-                ax.set_title(f"N = {run['config']['samples']}", fontsize=9.5, loc="center")
+                ax.set_title(run["label"] if run.get("compare") else f"N = {run['config']['samples']}",
+                             fontsize=9.5, loc="center", color=VIOLET if run.get("compare") else INK)
             if j == 0:
                 ax.set_ylabel(f"episode {s}", fontsize=9)
             e = by_seed.get(s)
@@ -362,7 +440,7 @@ def plot_trajectory_grid(plt, runs, out):
             if g is None:
                 ax.text(0.5, 0.5, "missing", transform=ax.transAxes, ha="center", color=INK2)
                 continue
-            draw_topdown(ax, g, color=cols[run["config"]["samples"]], compact=True)
+            draw_topdown(ax, g, color=VIOLET if run.get("compare") else cols[run["config"]["samples"]], compact=True)
             mark = "✓" if e["success"] else "✗"
             ax.text(0.03, 0.03, f"{mark} {100 * e['final_distance_m']:.1f} cm", transform=ax.transAxes, fontsize=8,
                     color=AQUA if e["success"] else RED, fontweight="bold")
@@ -375,7 +453,8 @@ def plot_trajectory_grid(plt, runs, out):
             for ax in axes[i]:
                 ax.set_xlim(lo[0], hi[0])
                 ax.set_ylim(lo[1], hi[1])
-    fig.suptitle("End-effector paths, top-down", x=0.01, ha="left", fontsize=11, fontweight="bold", color=INK)
+    fig.suptitle("End-effector paths, top-down", x=0.01, y=1 - 0.12 / fig.get_figheight(), ha="left", va="top",
+                 fontsize=11, fontweight="bold", color=INK)
     fig.text(0.01, 1 - 0.55 / fig.get_figheight(), "gray box: obstacle footprint · ○ start · ★ goal-image pose · × env target · same scene per row",
              fontsize=8, color=INK2)
     fig.tight_layout(rect=(0, 0, 1, 1 - 0.75 / fig.get_figheight()))
@@ -548,28 +627,52 @@ def write_csv(path, rows):
         w.writerows(rows)
 
 
-def markdown(runs, rows, episodes, figures, root):
+def compare_note(runs, cmp_runs):
+    if not cmp_runs:
+        return []
+    base = runs[0]["config"]
+    diffs = {k: [r["config"].get(k) for r in cmp_runs] for k in COMPARE_KEYS
+             if any(r["config"].get(k) != base.get(k) for r in cmp_runs)}
+    names = ", ".join(r["label"] for r in cmp_runs)
+    if not diffs:
+        return [f"Compared with {names} (◆ in the plots, last columns in the tables): same task, scene, seeds and "
+                "planner settings; only the model and N differ.", ""]
+    text = "; ".join(f"`{k}` {base.get(k)} here vs {v}" for k, v in diffs.items())
+    return [f"Compared with {names} (◆ in the plots). **Settings differ:** {text}.", ""]
+
+
+def markdown(runs, rows, episodes, figures, root, cmp_runs=(), cmp_rows=()):
     c = runs[0]["config"]
     thr = 100 * c.get("success_distance", 0.05)
-    lines = [f"# {c['task']} · {c['model_size']} · candidates ladder", "",
-             setting_text(runs[0]), "",
+    series = success_series(rows[0])
+    head = f"# {c['task']} · {c['model_size']} · candidates ladder"
+    if cmp_runs:
+        head += " · vs " + ", ".join(r["label"] for r in cmp_runs)
+    lines = [head, "", setting_text(runs[0]), "", *compare_note(runs, cmp_runs),
              f"Success = final end-effector distance {ref_text(rows)} ≤ {thr:.0f} cm (provisional). The goal-image "
              "pose is where the arm was when the goal image was rendered (what the planner is asked to match); the "
              "env target is the env's sampled point used by its reward. They differ when the env's expert stopped "
              f"short while rendering the goal: mean gap {fmt(100 * rows[0]['goal_pose_to_target_mean_m'], '.1f')} cm "
              "in this run. "
+             f"The {' and '.join(f'{cm:.0f}' for cm, *_ in series[1:])} cm columns are looser secondary "
+             "thresholds (near misses count). "
              "Time = wall-clock planning time per executed step (decision); predictor = synchronized time inside "
              "predictor forwards.", "",
-             "| N | batches × size | elites | episodes | success | final distance cm, median [IQR] | "
-             "to env target cm (median) | planning s/decision | predictor s/decision | predictor ms/call | episode min |",
-             "|---|---|---|---|---|---|---|---|---|---|---|"]
-    for r in rows:
-        lo, hi = r["success_ci_low"], r["success_ci_high"]
+             "| model | N | batches × size | elites | episodes | "
+             + " | ".join(f"success ≤ {cm:.0f} cm" for cm, *_ in series)
+             + " | final distance cm, mean ± SD | final distance cm, median [IQR] | to env target cm (median) | "
+             "planning s/decision | predictor s/decision | predictor ms/call | episode min |",
+             "|---|---|---|---|---|" + "---|" * len(series) + "---|---|---|---|---|---|---|"]
+    for r in [*rows, *cmp_rows]:
         failed = f" (+{r['failed']} failed)" if r["failed"] else ""
+        succ = " | ".join(f"{r[k]}/{r['episodes']} ({fmt(100 * r[rate], '.0f')}%, CI {fmt(100 * r[lo], '.0f')}–"
+                          f"{fmt(100 * r[hi], '.0f')})" for _, k, rate, lo, hi in series)
+        model = f"**{r['model']}**" if r["compare"] else r["model"]
         lines.append(
-            f"| {r['samples']} | {r['batches']} × {r['batch_size']} | {r['elites']} | {r['episodes']}{failed} | "
-            f"{r['successes']}/{r['episodes']} ({fmt(100 * r['success_rate'], '.0f')}%, CI {fmt(100 * lo, '.0f')}–"
-            f"{fmt(100 * hi, '.0f')}) | {fmt(100 * r['final_distance_median_m'], '.1f')} "
+            f"| {model} | {r['samples']} | {r['batches']} × {r['batch_size']} | {r['elites']} | {r['episodes']}{failed} | "
+            f"{succ} | "
+            f"{fmt(100 * r['final_distance_mean_m'], '.1f')} ± {fmt(100 * r['final_distance_sd_m'], '.1f')} | "
+            f"{fmt(100 * r['final_distance_median_m'], '.1f')} "
             f"[{fmt(100 * r['final_distance_q1_m'], '.1f')}–{fmt(100 * r['final_distance_q3_m'], '.1f')}] | "
             f"{fmt(100 * r['final_distance_target_median_m'], '.1f')} | "
             f"{fmt(r['planning_s_per_decision'], '.1f')} | {fmt(r['predictor_s_per_decision'], '.1f')} | "
@@ -580,11 +683,12 @@ def markdown(runs, rows, episodes, figures, root):
     seeds = sorted({e["seed"] for e in episodes})
     if seeds:
         lines += ["## Final distance per episode (cm; ✓ = success)", "",
-                  "| episode | " + " | ".join(f"N={r['samples']}" for r in rows) + " |",
-                  "|---|" + "---|" * len(rows)]
+                  "| episode | " + " | ".join(r["label"] if r["compare"] else f"N={r['samples']}"
+                                              for r in [*rows, *cmp_rows]) + " |",
+                  "|---|" + "---|" * (len(rows) + len(cmp_rows))]
         for s in seeds:
             cells = []
-            for run in runs:
+            for run in [*runs, *cmp_runs]:
                 e = next((x for x in run["episodes"] if x["seed"] == s), None)
                 if e is None:
                     cells.append("failed" if s in run["failed"] else "–")
@@ -596,34 +700,57 @@ def markdown(runs, rows, episodes, figures, root):
     (root / "README.md").write_text("\n".join(lines))
 
 
-def report(root, videos=True, force=False, quiet=False):
+def report(root, videos=True, force=False, quiet=False, compare=None):
+    """compare=None reuses the comparison runs saved in report/report.json; a list (possibly empty) replaces them."""
     root = Path(root)
     runs = [r for r in load_runs(root) if r["episodes"]]
     if not runs:
         raise SystemExit(f"no completed episodes under {root}")
     out = root / "report"
     out.mkdir(exist_ok=True)
+    saved = out / "report.json"
+    if compare is None:
+        compare = [root / p for p in json.loads(saved.read_text()).get("compare", [])] if saved.exists() else []
+    else:
+        compare = [Path(p).resolve() for p in compare]
+        saved.write_text(json.dumps({"compare": [os.path.relpath(p, root) for p in compare]}, indent=2) + "\n")
+    for r in runs:
+        r["label"] = f"{r['config']['model_size'].upper()}, N = {r['config']['samples']}"
+    cmp_runs = []
+    for d in compare:
+        for r in load_runs(d):
+            if r["episodes"]:
+                r["compare"] = True
+                r["name"] = f"{r['config']['model_size']}_{r['name']}"
+                r["label"] = f"{r['config']['model_size'].upper()}, N = {r['config']['samples']}"
+                cmp_runs.append(r)
     plt = plt_setup()
     rows = [run_row(r) for r in runs]
-    episodes = [e for r in runs for e in r["episodes"]]
-    write_csv(out / "summary.csv", rows)
+    cmp_rows = [run_row(r) for r in cmp_runs]
+    for r in [*runs, *cmp_runs]:
+        for e in r["episodes"]:
+            e["run"] = r["name"]
+    episodes = [e for r in [*runs, *cmp_runs] for e in r["episodes"]]
+    write_csv(out / "summary.csv", [*rows, *cmp_rows])
     write_csv(out / "episodes.csv", [{k: v for k, v in e.items() if not isinstance(v, (list, dict, Path))}
                                      for e in episodes])
     figures = []
     if len(rows) > 1:
-        plot_time(plt, runs, rows, out)
+        plot_time(plt, runs, rows, out, cmp_rows)
         success_panels(plt, runs, rows, "samples", "candidate action sequences per CEM iteration (N)",
-                       "Does more candidates raise success?", out / "success_vs_samples.png", log_x=True)
+                       "Does more candidates raise success?", out / "success_vs_samples.png", log_x=True,
+                       cmp_runs=cmp_runs, cmp_rows=cmp_rows)
         success_panels(plt, runs, rows, "planning_s_per_decision", "planning seconds per decision",
-                       "Success vs planning time", out / "success_vs_time.png", log_x=False)
+                       "Success vs planning time", out / "success_vs_time.png", log_x=False,
+                       cmp_runs=cmp_runs, cmp_rows=cmp_rows)
         figures += [("time_vs_samples.png", "Planning time vs candidates"),
                     ("success_vs_samples.png", "Success vs candidates"),
                     ("success_vs_time.png", "Success vs planning time")]
-    plot_distance_steps(plt, runs, out)
+    plot_distance_steps(plt, runs, out, cmp_runs)
     figures.append(("distance_vs_step.png", "Distance to goal during the episode"))
-    if plot_trajectory_grid(plt, runs, out):
+    if plot_trajectory_grid(plt, [*runs, *cmp_runs], out):
         figures.append(("trajectories.png", "End-effector paths with the obstacle"))
-    for run in runs:
+    for run in [*runs, *cmp_runs]:
         for e in run["episodes"]:
             d = out / "episodes" / f"{run['name']}_seed{e['seed']:05d}"
             d.mkdir(parents=True, exist_ok=True)
@@ -634,7 +761,7 @@ def report(root, videos=True, force=False, quiet=False):
                 plot_episode(plt, e, g, d / "trajectory.png")
             if videos and (force or not (d / "video.mp4").exists()):
                 episode_video(plt, e, g, d / "video.mp4")
-    markdown(runs, rows, episodes, figures, out)
+    markdown(runs, rows, episodes, figures, out, cmp_runs, cmp_rows)
     if not quiet:
         print(f"report: {out / 'README.md'}")
     return out
